@@ -273,23 +273,16 @@ if __name__ == '__main__':
     clf_token = encoder['_classify_']
     n_special = 3
     max_len = n_ctx // 2 - 2
-    n_ctx = min(max([len(x1[:max_len]) + max(len(x2[:max_len]),
-                                             len(x3[:max_len])) for x1,
-                     x2,
-                     x3 in zip(trX1,
-                               trX2,
-                               trX3)] + [len(x1[:max_len]) + max(len(x2[:max_len]),
-                                                                 len(x3[:max_len])) for x1,
-                                         x2,
-                                         x3 in zip(vaX1,
-                                                   vaX2,
-                                                   vaX3)] + [len(x1[:max_len]) + max(len(x2[:max_len]),
-                                                                                     len(x3[:max_len])) for x1,
-                                                             x2,
-                                                             x3 in zip(teX1,
-                                                                       teX2,
-                                                                       teX3)]) + 3,
-                n_ctx)
+    n_ctx = min(max(
+        [len(x1[:max_len]) + max(len(x2[:max_len]),
+                                 len(x3[:max_len])) for x1, x2, x3 in zip(trX1, trX2, trX3)]
+        + [len(x1[:max_len]) + max(len(x2[:max_len]),
+                                   len(x3[:max_len])) for x1, x2, x3 in zip(vaX1, vaX2, vaX3)]
+        + [len(x1[:max_len]) + max(len(x2[:max_len]),
+                                   len(x3[:max_len])) for x1, x2, x3 in zip(teX1, teX2, teX3)]
+    ) + 3,
+        n_ctx)
+
     vocab = n_vocab + n_special + n_ctx
     trX, trM = transform_roc(trX1, trX2, trX3)
     vaX, vaM = transform_roc(vaX1, vaX2, vaX3)
