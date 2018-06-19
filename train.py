@@ -7,9 +7,10 @@ import random
 import argparse
 import numpy as np
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import chainer
+from chainer import cuda
+from chainer import functions as F
+from chainer import links as L
 
 from tqdm import tqdm
 from functools import partial
@@ -17,7 +18,7 @@ from sklearn.utils import shuffle
 from sklearn.metrics import accuracy_score
 
 from model_py import Model, LMHead, ClfHead, load_openai_pretrained_model
-from opt import OpenAIAdam
+from opt import get_OpenAIAdam
 from datasets import rocstories
 from analysis import rocstories as rocstories_analysis
 from text_utils import TextEncoder
@@ -44,13 +45,13 @@ class LossCompute:
             only_return_losses=False):
         # Language modeling loss
         if lm_logits is not None:
-            x_shifted = X[:, :, 1:, 0].contiguous(
-            ).view(-1)           # Shape: 252
-            M = M.view(-1, M.size(2))
+            x_shifted = X[:, :, 1:, 0].reshape(-1)           # Shape: 252
+            M = M.reshape(-1, M.shape[2])
             lm_losses = self.lm_criterion(lm_logits, x_shifted)
-            lm_losses = lm_losses.view(X.size(0) * X.size(1), X.size(2) - 1)
+            lm_losses = lm_losses.reshape(
+                X.shape[0] * X.shape[1], X.shape[2] - 1)
             lm_losses = lm_losses * M[:, 1:]
-            lm_losses = lm_losses.sum(1) / torch.sum(M[:, 1:], 1)
+            lm_losses = F.sum(lm_losses, axis=1) / F.sum(M[:, 1:], axis=1)
         # Classification loss
         clf_losses = self.clf_criterion(clf_logits, Y)
         if only_return_losses:
@@ -59,14 +60,17 @@ class LossCompute:
                 lm_losses) if lm_logits is not None else clf_losses
 
         if self.lm_coef > 0 and lm_logits is not None:
-            train_loss = clf_losses.sum() + self.lm_coef * lm_losses.sum()
+            train_loss = F.sum(clf_losses) + self.lm_coef * F.sum(lm_losses)
         else:
-            train_loss = clf_losses.sum()
+            train_loss = F.sum(clf_losses)
+
+        if self.opt is not None:
+            self.opt.target.cleargrads()
         train_loss.backward()
         if self.opt is not None:
-            self.opt.step()
-            self.opt.zero_grad()
-        return train_loss.item()
+            self.opt.update()
+            self.opt.target.cleargrads()
+        return train_loss.array
 
 
 def transform_roc(X1, X2, X3):
@@ -93,38 +97,38 @@ def iter_apply(Xs, Ms, Ys):
     # fns = [lambda x: np.concatenate(x, 0), lambda x: float(np.sum(x))]
     logits = []
     cost = 0
-    with torch.no_grad():
-        model.eval()
+    with chainer.using_config('train', False), \
+            chainer.using_config('enable_backprop', False):
         for xmb, mmb, ymb in iter_data(
                 Xs, Ms, Ys, n_batch=n_batch_train, truncate=False, verbose=True):
             n = len(xmb)
-            XMB = torch.tensor(xmb, dtype=torch.long).to(device)
-            YMB = torch.tensor(ymb, dtype=torch.long).to(device)
-            MMB = torch.tensor(mmb).to(device)
+            XMB = model.xp.asarray(xmb)
+            YMB = model.xp.asarray(ymb)
+            MMB = model.xp.asarray(mmb)
             h = model(XMB)
             clf_logits = clf_head(h, XMB)
             clf_logits *= n
             clf_losses = compute_loss_fct(
                 XMB, YMB, MMB, clf_logits, only_return_losses=True)
             clf_losses *= n
-            logits.append(clf_logits.to("cpu").numpy())
-            cost += clf_losses.sum().item()
+            logits.append(cuda.to_cpu(clf_logits.array))
+            cost += cuda.to_cpu(F.sum(clf_losses).array)
         logits = np.concatenate(logits, 0)
     return logits, cost
 
 
 def iter_predict(Xs, Ms):
     logits = []
-    with torch.no_grad():
-        model.eval()
+    with chainer.using_config('train', False), \
+            chainer.using_config('enable_backprop', False):
         for xmb, mmb in iter_data(
                 Xs, Ms, n_batch=n_batch_train, truncate=False, verbose=True):
             n = len(xmb)
-            XMB = torch.tensor(xmb, dtype=torch.long).to(device)
-            MMB = torch.tensor(mmb).to(device)
+            XMB = model.xp.asarray(xmb)
+            MMB = model.xp.asarray(mmb)
             h = model(XMB)
             clf_logits = clf_head(h, XMB)
-            logits.append(clf_logits.to("cpu").numpy())
+            logits.append(cuda.to_cpu(clf_logits.array))
     logits = np.concatenate(logits, 0)
     return logits
 
@@ -148,7 +152,7 @@ def log():
         if score > best_score:
             best_score = score
             path = os.path.join(save_dir, desc, 'best_params')
-            torch.save(model.state_dict(), make_path(path))
+            chainer.serializers.save_npz(make_path(path), model)
 
 
 def predict():
@@ -170,10 +174,9 @@ def run_epoch():
     for xmb, mmb, ymb in iter_data(*shuffle(trX, trM, trYt, random_state=np.random),
                                    n_batch=n_batch_train, truncate=True, verbose=True):
         global n_updates
-        model.train()
-        XMB = torch.tensor(xmb, dtype=torch.long).to(device)
-        YMB = torch.tensor(ymb, dtype=torch.long).to(device)
-        MMB = torch.tensor(mmb).to(device)
+        XMB = model.xp.asarray(xmb)
+        YMB = model.xp.asarray(ymb)
+        MMB = model.xp.asarray(mmb)
         h = model(XMB)
         lm_logits = lm_head(h)
         clf_logits = clf_head(h, XMB)
@@ -246,17 +249,22 @@ if __name__ == '__main__':
     parser.add_argument('--e', type=float, default=1e-8)
     parser.add_argument('--n_valid', type=int, default=374)
 
+    parser.add_argument('--device-id', '--device', type=int, default=0,
+                        help='id of used gpu. -1 indicates cpu.')
+
     args = parser.parse_args()
     print(args)
     # TODO maybe we want to remove these gobal variables to make it cleaner
     globals().update(args.__dict__)
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    os.environ['CHAINER_SEED'] = str(seed)
+    # os.environ['CHAINER_CUDNN'] = str(0)
+    # chainer.config.cudnn_deterministic = True
 
-    # torch.device object used throughout this script TODO add gpu setting
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device_id >= 0:
+        cuda.get_device_from_id(device_id).use()
+        cuda.cupy.random.seed(seed)
 
     logger = ResultLogger(path=os.path.join(
         log_dir, '{}.jsonl'.format(desc)), **args.__dict__)
@@ -298,17 +306,21 @@ if __name__ == '__main__':
     lm_head = LMHead(model, args)
     clf_head = ClfHead(clf_token, args)
 
-    criterion = nn.CrossEntropyLoss(reduce=False)  # TODO check loss functions
-    model_opt = OpenAIAdam(model.parameters(), lr=lr, schedule=lr_schedule,
-                           warmup=lr_warmup, t_total=n_updates_total, b1=b1,
-                           b2=b2, e=e, l2=l2, vector_l2=vector_l2,
-                           max_grad_norm=max_grad_norm)
+    criterion = F.SoftmaxCrossEntropy(reduce='no')
+    model_opt = get_OpenAIAdam([model, clf_head], lr=lr, schedule=lr_schedule,
+                               warmup=lr_warmup, t_total=n_updates_total, b1=b1,
+                               b2=b2, e=e, l2=l2, vector_l2=vector_l2,
+                               max_grad_norm=max_grad_norm)
+    # model_opt.setup(model)
     compute_loss_fct = LossCompute(criterion, criterion, lm_coef, model_opt)
     load_openai_pretrained_model(model, n_ctx=n_ctx, n_special=n_special)
 
-    model.to(device)
-    lm_head.to(device)
-    clf_head.to(device)
+    if device_id >= 0:
+        cuda.cupy.random.seed(seed)
+
+        model.to_gpu()
+        lm_head.to_gpu()
+        clf_head.to_gpu()
 
     n_updates = 0
     n_epochs = 0
@@ -316,7 +328,7 @@ if __name__ == '__main__':
         trYt = trY
     if submit:
         path = os.path.join(save_dir, desc, 'best_params')
-        torch.save(model.state_dict(), make_path(path))
+        chainer.serializers.save_npz(make_path(path), model)
     best_score = 0
     for i in range(n_iter):
         print("running epoch", i)
@@ -325,7 +337,7 @@ if __name__ == '__main__':
         log()
     if submit:
         path = os.path.join(save_dir, desc, 'best_params')
-        model.load_state_dict(torch.load(path))
+        chainer.serializers.load_npz(make_path(path), model)
         predict()
         if analysis:
             rocstories_analysis(

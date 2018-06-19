@@ -1,12 +1,13 @@
 import math
-import torch
-from torch.optim import Optimizer
-from torch.nn.utils import clip_grad_norm_
+
+import chainer
+from chainer import cuda
+import numpy
 
 
 def warmup_cosine(x, warmup=0.002):
     s = 1 if x <= warmup else 0
-    return s * (x / warmup) + (1 - s) * (0.5 * (1 + torch.cos(math.pi * x)))
+    return s * (x / warmup) + (1 - s) * (0.5 * (1 + math.cos(math.pi * x)))
 
 
 def warmup_constant(x, warmup=0.002):
@@ -26,96 +27,125 @@ SCHEDULES = {
 }
 
 
-class OpenAIAdam(Optimizer):
+def _scheduled_learning_rate(schedule, hp, t):
+    if t == 0:
+        raise RuntimeError(
+            'Can\'t determine the learning rate of Adam optimizer '
+            'because the update steps have not been started.')
+    fix1 = 1. - math.pow(hp.beta1, t)
+    fix2 = 1. - math.pow(hp.beta2, t)
+    lrt = hp.alpha * math.sqrt(fix2) / fix1
+    lrt *= schedule(t / hp.t_total, hp.warmup)
+    return lrt
+
+
+class OpenAIAdamRule(chainer.optimizers.adam.AdamRule):
     """Implements Open AI version of Adam algorithm with weight decay fix.
+
+    The used adam has some differences from normal adam,
+    although most of lines are same as https://github.com/chainer/chainer/blob/v4.1.0/chainer/optimizers/adam.py.
     """
 
-    def __init__(self, params, lr, schedule, warmup, t_total,
-                 b1=0.9, b2=0.999, e=1e-8, l2=0,
-                 vector_l2=False, max_grad_norm=-1, **kwargs):
-        if not 0.0 <= lr:
-            raise ValueError("Invalid learning rate: {}".format(lr))
-        if schedule not in SCHEDULES:
-            raise ValueError("Invalid schedule parameter: {}".format(schedule))
-        if not 0 <= warmup:
-            raise ValueError("Invalid warmup: {}".format(warmup))
-        if not 0.0 <= b1 < 1.0:
-            raise ValueError("Invalid b1 parameter: {}".format(b1))
-        if not 0.0 <= b2 < 1.0:
-            raise ValueError("Invalid b2 parameter: {}".format(b2))
-        if not 0.0 <= e:
-            raise ValueError("Invalid epsilon value: {}".format(e))
-        defaults = dict(
-            lr=lr,
-            schedule=schedule,
-            warmup=warmup,
-            t_total=t_total,
-            b1=b1,
-            b2=b2,
-            e=e,
-            l2=l2,
-            vector_l2=vector_l2,
-            max_grad_norm=max_grad_norm)
-        super(OpenAIAdam, self).__init__(params, defaults)
+    def __init__(self, schedule, parent_hyperparam=None,
+                 alpha=None, beta1=None, beta2=None, eps=None,
+                 eta=None, weight_decay_rate=None, amsgrad=None):
+        super(OpenAIAdamRule, self).__init__(
+            parent_hyperparam,
+            alpha, beta1, beta2, eps,
+            eta, weight_decay_rate, amsgrad)
+        self.schedule = schedule
+        assert not amsgrad  # amsgrad implementation is skipped
 
-    def step(self, closure=None):
-        """Performs a single optimization step.
+    def update_core_cpu(self, param):
+        grad = param.grad
+        if grad is None:
+            return
+        hp = self.hyperparam
+        eps = grad.dtype.type(hp.eps)
+        if hp.eps != 0 and eps == 0:
+            raise ValueError(
+                'eps of Adam optimizer is too small for {} ({})'.format(
+                    grad.dtype.name, hp.eps))
+        m, v = self.state['m'], self.state['v']
 
-        Arguments:
-            closure (callable, optional): A closure that reevaluates the model
-                and returns the loss.
-        """
-        loss = None
-        if closure is not None:
-            loss = closure()
+        m += (1 - hp.beta1) * (grad - m)
+        v += (1 - hp.beta2) * (grad * grad - v)
 
-        for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                grad = p.grad.data
-                if grad.is_sparse:
-                    raise RuntimeError(
-                        'Adam does not support sparse gradients, please consider SparseAdam instead')
+        vhat = v
+        # This adam multipies schduled adaptive learning rate
+        # with both main term and weight decay.
+        # Normal Adam: param.data -= hp.eta * (self.lr * m / (numpy.sqrt(vhat) + hp.eps) +
+        #                                      hp.weight_decay_rate * param.data)
+        param.data -= hp.eta * self.lr * (m / (numpy.sqrt(vhat) + hp.eps) +
+                                          hp.weight_decay_rate * param.data)
 
-                state = self.state[p]
+    def update_core_gpu(self, param):
+        grad = param.grad
+        if grad is None:
+            return
 
-                # State initialization
-                if len(state) == 0:
-                    state['step'] = 0
-                    # Exponential moving average of gradient values
-                    state['exp_avg'] = torch.zeros_like(p.data)
-                    # Exponential moving average of squared gradient values
-                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+        hp = self.hyperparam
+        eps = grad.dtype.type(hp.eps)
+        if hp.eps != 0 and eps == 0:
+            raise ValueError(
+                'eps of Adam optimizer is too small for {} ({})'.format(
+                    grad.dtype.name, hp.eps))
 
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-                beta1, beta2 = group['b1'], group['b2']
+        cuda.elementwise(
+            'T grad, T lr, T one_minus_beta1, T one_minus_beta2, T eps, \
+             T eta, T weight_decay_rate',
+            'T param, T m, T v',
+            '''m += one_minus_beta1 * (grad - m);
+               v += one_minus_beta2 * (grad * grad - v);
+               param -= eta * lr * (m / (sqrt(v) + eps) +
+                               weight_decay_rate * param);''',
+            'adam')(grad, self.lr, 1 - hp.beta1,
+                    1 - hp.beta2, hp.eps,
+                    hp.eta, hp.weight_decay_rate,
+                    param.data, self.state['m'], self.state['v'])
 
-                state['step'] += 1
+    @property
+    def lr(self):
+        return _scheduled_learning_rate(self.schedule, self.hyperparam, self.t)
 
-                # Add grad clipping
-                if group['max_grad_norm'] > 0:
-                    clip_grad_norm_(p, group['max_grad_norm'])
 
-                # Decay the first and second moment running average coefficient
-                exp_avg.mul_(beta1).add_(1 - beta1, grad)
-                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
-                denom = exp_avg_sq.sqrt().add_(group['e'])
+class OpenAIAdam(chainer.optimizers.Adam):
+    def __init__(self,
+                 warmup,
+                 t_total,
+                 schedule,
+                 alpha=0.001,
+                 beta1=0.9,
+                 beta2=0.999,
+                 eps=1e-8,
+                 eta=1.0,
+                 weight_decay_rate=0.,
+                 amsgrad=False):
+        super(OpenAIAdam, self).__init__(
+            alpha, beta1, beta2, eps,
+            eta, weight_decay_rate, amsgrad)
+        assert t_total is not None
+        self.hyperparam.warmup = warmup
+        self.hyperparam.t_total = t_total * 1.0
 
-                bias_correction1 = 1 - beta1 ** state['step']
-                bias_correction2 = 1 - beta2 ** state['step']
+        self.warmup = chainer.optimizer.HyperparameterProxy('warmup')
+        self.t_total = chainer.optimizer.HyperparameterProxy('t_total')
+        self.schedule = schedule
 
-                schedule_fct = SCHEDULES[group['schedule']]
-                lr_scheduled = group['lr'] * schedule_fct(
-                    state['step'] / group['t_total'], group['warmup'])
-                step_size = lr_scheduled * \
-                    math.sqrt(bias_correction2) / bias_correction1
+    def create_update_rule(self):
+        return OpenAIAdamRule(self.schedule, self.hyperparam)
 
-                p.data.addcdiv_(-step_size, exp_avg, denom)
 
-                # Add weight decay at the end (fixed version)
-                if (len(p.size()) >
-                        1 or group['vector_l2']) and group['l2'] > 0:
-                    p.data.add_(-lr_scheduled * group['l2'], p.data)
-
-        return loss
+def get_OpenAIAdam(models,
+                   lr, schedule,
+                   warmup, t_total, b1=0.9,
+                   b2=0.999, e=1e-8, l2=0., vector_l2=False,
+                   max_grad_norm=-1):
+    opt = OpenAIAdam(schedule=SCHEDULES[schedule],
+                     warmup=warmup, t_total=t_total,
+                     alpha=lr, beta1=b1,
+                     beta2=b2, eps=e, weight_decay_rate=l2)
+    opt.setup(chainer.ChainList(*models))  # tricky
+    # TODO: grad norm clipping
+    # TODO: vector l2
+    return opt
