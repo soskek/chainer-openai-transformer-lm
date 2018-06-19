@@ -4,7 +4,7 @@ This is a **Chainer** implementation of the [TensorFlow code](https://github.com
 
 This implementation comprises **a script to load in the Chainer model the weights pre-trained by the authors** with the TensorFlow implementation.
 This is made from [pytorch implementation](https://github.com/huggingface/pytorch-openai-transformer-lm) by line-level replacements as possible.
-If you are interested in differences, see [a diff](https://github.com/soskek/chainer-openai-transformer-lm/commit/b2b971e460e66d8318c2ff0c1b48621856509673) as an example.
+If you are interested, see [the diff](https://github.com/soskek/chainer-openai-transformer-lm/commit/b2b971e460e66d8318c2ff0c1b48621856509673).
 This does not always contain implementations which are conventionally natural for chainer, but you can enjoy alignments with pytorch (and tensorflow).
 
 
