@@ -1,114 +1,123 @@
+import sys
 import re
 import math
 import json
 import copy
 import numpy as np
 
-import torch
-import torch.nn as nn
-from torch.nn.parameter import Parameter
+import chainer
+import chainer.functions as F
+import chainer.links as L
+from chainer import initializers
+
+# nn.Dropout2d is replaced with F.dropout by ignoring differences
 
 
 def gelu(x):
-    return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi)
-                                     * (x + 0.044715 * torch.pow(x, 3))))
+    return 0.5 * x * (1 + F.tanh(math.sqrt(2 / math.pi)
+                                 * (x + 0.044715 * (x ** 3))))
 
 
 def swish(x):
-    return x * torch.sigmoid(x)
+    return x * F.sigmoid(x)
 
 
 ACT_FNS = {
-    'relu': nn.ReLU,
+    'relu': F.relu,
     'swish': swish,
     'gelu': gelu
 }
 
 
-class LayerNorm(nn.Module):
+class LayerNorm(chainer.Chain):
     "Construct a layernorm module (See citation for details)."
 
     def __init__(self, n_state, e=1e-5):
         super(LayerNorm, self).__init__()
-        self.g = nn.Parameter(torch.ones(n_state))
-        self.b = nn.Parameter(torch.zeros(n_state))
+        with self.init_scope():
+            self.g = chainer.Parameter(1., n_state)
+            self.b = chainer.Parameter(0., n_state)
         self.e = e
 
-    def forward(self, x):
-        u = x.mean(-1, keepdim=True)
-        s = (x - u).pow(2).mean(-1, keepdim=True)
-        x = (x - u) / torch.sqrt(s + self.e)
-        return self.g * x + self.b
+    def __call__(self, x):
+        # chainer requires explicit broadcast for avoiding latent bugs
+        u = F.mean(x, -1, keepdims=True)
+        u = F.broadcast_to(u, x.shape)
+        s = F.mean((x - u) ** 2, -1, keepdims=True)
+        s = F.broadcast_to(s, x.shape)
+        x = (x - u) / F.sqrt(s + self.e)
+        return F.bias(F.scale(x, self.g, axis=2), self.b, axis=2)
 
 
-class Conv1D(nn.Module):
+class Conv1D(chainer.Chain):
     def __init__(self, nf, rf, nx):
         super(Conv1D, self).__init__()
         self.rf = rf
         self.nf = nf
         if rf == 1:  # faster 1x1 conv
-            w = torch.empty(nx, nf)
-            nn.init.normal_(w, std=0.02)
-            self.w = Parameter(w)
-            self.b = Parameter(torch.zeros(nf))
+            with self.init_scope():
+                self.w = chainer.Parameter(
+                    initializers.Normal(scale=0.02), (nf, nx))  # transposed
+                self.b = chainer.Parameter(0., nf)
         else:  # was used to train LM
             raise NotImplementedError
 
-    def forward(self, x):
+    def __call__(self, x):
         if self.rf == 1:
-            size_out = x.size()[:-1] + (self.nf,)
-            x = torch.addmm(self.b, x.view(-1, x.size(-1)), self.w)
-            x = x.view(*size_out)
+            size_out = x.shape[:-1] + (self.nf,)
+            x = F.linear(x.reshape(-1, x.shape[-1]), self.w, self.b)
+            x = x.reshape(*size_out)
         else:
             raise NotImplementedError
         return x
 
 
-class Attention(nn.Module):
+class Attention(chainer.Chain):
     def __init__(self, nx, n_ctx, cfg, scale=False):
         super(Attention, self).__init__()
         n_state = nx  # in Attention: n_state=768 (nx=n_embd)
         #[switch nx => n_state from Block to Attention to keep identical to TF implem]
         assert n_state % cfg.n_head == 0
-        self.register_buffer(
-            'b', torch.tril(
-                torch.ones(
-                    n_ctx, n_ctx)).view(
-                1, 1, n_ctx, n_ctx))
         self.n_head = cfg.n_head
         self.split_size = n_state
         self.scale = scale
-        self.c_attn = Conv1D(n_state * 3, 1, nx)
-        self.c_proj = Conv1D(n_state, 1, nx)
-        self.attn_dropout = nn.Dropout(cfg.attn_pdrop)
-        self.resid_dropout = nn.Dropout(cfg.resid_pdrop)
+        with self.init_scope():
+            self.b = chainer.Parameter(
+                np.tril(np.ones((n_ctx, n_ctx)), 0)[None, None])
+            self.b._requires_grad = False  # `b` is just registered without param update
+            self.c_attn = Conv1D(n_state * 3, 1, nx)
+            self.c_proj = Conv1D(n_state, 1, nx)
+        self.attn_dropout = lambda x: F.dropout(x, cfg.attn_pdrop)
+        self.resid_dropout = lambda x: F.dropout(x, cfg.resid_pdrop)
 
     def _attn(self, q, k, v):
-        w = torch.matmul(q, k)
+        w = F.batch_matmul(q.reshape(-1, *q.shape[-2:]),
+                           k.reshape(-1, *k.shape[-2:]))
         if self.scale:
-            w = w / math.sqrt(v.size(-1))
+            w = w / math.sqrt(v.shape[-1])
         # TF implem method: mask_attn_weights
-        w = w * self.b + -1e9 * (1 - self.b)
-        w = nn.Softmax(dim=-1)(w)
+        w = w * self.b.array[0] + -1e9 * (1 - self.b.array[0])
+        w = F.softmax(w, axis=2)
         w = self.attn_dropout(w)
-        return torch.matmul(w, v)
+        return F.batch_matmul(w, v.reshape(-1, *v.shape[-2:]))\
+                .reshape(v.shape[0], v.shape[1], v.shape[2], -1)
 
     def merge_heads(self, x):
-        x = x.permute(0, 2, 1, 3).contiguous()
-        new_x_shape = x.size()[:-2] + (x.size(-2) * x.size(-1),)
-        return x.view(*new_x_shape)  # in Tensorflow implem: fct merge_states
+        x = F.transpose(x, (0, 2, 1, 3))
+        new_x_shape = x.shape[:-2] + (x.shape[-2] * x.shape[-1], )
+        return x.reshape(*new_x_shape)
 
     def split_heads(self, x, k=False):
-        new_x_shape = x.size()[:-1] + (self.n_head, x.size(-1) // self.n_head)
-        x = x.view(*new_x_shape)  # in Tensorflow implem: fct split_states
+        new_x_shape = x.shape[:-1] + (self.n_head, x.shape[-1] // self.n_head)
+        x = x.reshape(*new_x_shape)  # in Tensorflow implem: fct split_states
         if k:
-            return x.permute(0, 2, 3, 1)
+            return F.transpose(x, (0, 2, 3, 1))
         else:
-            return x.permute(0, 2, 1, 3)
+            return F.transpose(x, (0, 2, 1, 3))
 
-    def forward(self, x):
+    def __call__(self, x):
         x = self.c_attn(x)
-        query, key, value = x.split(self.split_size, dim=2)
+        query, key, value = F.split_axis(x, 3, axis=2)
         query = self.split_heads(query)
         key = self.split_heads(key, k=True)
         value = self.split_heads(value)
@@ -119,31 +128,33 @@ class Attention(nn.Module):
         return a
 
 
-class MLP(nn.Module):
+class MLP(chainer.Chain):
     def __init__(self, n_state, cfg):  # in MLP: n_state=3072 (4 * n_embd)
         super(MLP, self).__init__()
         nx = cfg.n_embd
-        self.c_fc = Conv1D(n_state, 1, nx)
-        self.c_proj = Conv1D(nx, 1, n_state)
+        with self.init_scope():
+            self.c_fc = Conv1D(n_state, 1, nx)
+            self.c_proj = Conv1D(nx, 1, n_state)
         self.act = ACT_FNS[cfg.afn]
-        self.dropout = nn.Dropout(cfg.resid_pdrop)
+        self.dropout = lambda x: F.dropout(x, cfg.resid_pdrop)
 
-    def forward(self, x):
+    def __call__(self, x):
         h = self.act(self.c_fc(x))
         h2 = self.c_proj(h)
         return self.dropout(h2)
 
 
-class Block(nn.Module):
+class Block(chainer.Chain):
     def __init__(self, n_ctx, cfg, scale=False):
         super(Block, self).__init__()
         nx = cfg.n_embd
-        self.attn = Attention(nx, n_ctx, cfg, scale)
-        self.ln_1 = LayerNorm(nx)
-        self.mlp = MLP(4 * nx, cfg)
-        self.ln_2 = LayerNorm(nx)
+        with self.init_scope():
+            self.attn = Attention(nx, n_ctx, cfg, scale)
+            self.ln_1 = LayerNorm(nx)
+            self.mlp = MLP(4 * nx, cfg)
+            self.ln_2 = LayerNorm(nx)
 
-    def forward(self, x):
+    def __call__(self, x):
         a = self.attn(x)
         n = self.ln_1(x + a)
         m = self.mlp(n)
@@ -151,51 +162,49 @@ class Block(nn.Module):
         return h
 
 
-class Model(nn.Module):
+class Model(chainer.Chain):
     """ Transformer model """
 
     def __init__(self, cfg, vocab=40990, n_ctx=512):
         super(Model, self).__init__()
         self.vocab = vocab
-        self.embed = nn.Embedding(vocab, cfg.n_embd)
-        self.drop = nn.Dropout(cfg.embd_pdrop)
-        block = Block(n_ctx, cfg, scale=True)
-        self.h = nn.ModuleList([copy.deepcopy(block)
-                                for _ in range(cfg.n_layer)])
-        self.decoder = nn.Linear(cfg.n_embd, vocab, bias=False)
-        self.decoder.weight = self.embed.weight  # Tied weights
+        with self.init_scope():
+            self.embed = L.EmbedID(vocab, cfg.n_embd,
+                                   initializers.Normal(scale=0.02))
+            self.drop = lambda x: F.dropout(x, cfg.embd_pdrop)
+            block = Block(n_ctx, cfg, scale=True)
+            self.h = chainer.ChainList(*[copy.deepcopy(block)
+                                         for _ in range(cfg.n_layer)])
+        self.decoder = lambda x: F.linear(x, self.embed.W)
         # To reproduce the noise_shape parameter of TF implementation
-        self.clf_dropout = nn.Dropout2d(cfg.clf_pdrop)
+        self.clf_dropout = lambda x: F.dropout(x, cfg.clf_pdrop)
 
-        nn.init.normal_(self.embed.weight, std=0.02)
-
-    def forward(self, x):
-        x = x.view(-1, x.size(2), x.size(3))
+    def __call__(self, x):
+        x = x.reshape(-1, x.shape[2], x.shape[3])
         e = self.embed(x)
-        h = e.sum(dim=2)
+        h = F.sum(e, axis=2)
         for block in self.h:
             h = block(h)
         return h
 
 
-class LMHead(nn.Module):
+class LMHead(chainer.Chain):
     """ Language Model Head for the transformer """
 
     def __init__(self, model, cfg):
         super(LMHead, self).__init__()
         self.n_embd = cfg.n_embd
-        self.decoder = nn.Linear(cfg.n_embd, model.vocab, bias=False)
-        self.decoder.weight = model.embed.weight  # Tied weights
+        self.decoder = lambda x: F.linear(x, model.embed.W)
 
-    def forward(self, h):
+    def __call__(self, h):
         # Truncated Language modeling logits
         # Shape: 252, 768
-        h_trunc = h[:, :-1].contiguous().view(-1, self.n_embd)
+        h_trunc = h[:, :-1].reshape(-1, self.n_embd)
         lm_logits = self.decoder(h_trunc)
         return lm_logits
 
 
-class ClfHead(nn.Module):
+class ClfHead(chainer.Chain):
     """ Classifier Head for the transformer """
 
     def __init__(self, clf_token, cfg):
@@ -203,22 +212,22 @@ class ClfHead(nn.Module):
         self.n_embd = cfg.n_embd
         self.clf_token = clf_token
         # To reproduce the noise_shape parameter of TF implementation
-        self.dropout = nn.Dropout2d(cfg.clf_pdrop)
-        self.linear = nn.Linear(cfg.n_embd, 1)
-        nn.init.normal_(self.linear.weight, std=0.02)
-        nn.init.normal_(self.linear.bias, 0)
+        self.dropout = lambda x: F.dropout(x, cfg.clf_pdrop)
+        with self.init_scope():
+            self.linear = L.Linear(cfg.n_embd, 1,
+                                   initialW=initializers.Normal(scale=0.02))
 
-    def forward(self, h, x):
+    def __call__(self, h, x):
         # Classification logits
-        clf_h = h.view(-1, self.n_embd)
-        flat = x[:, :, :, 0].contiguous().view(-1)
+        clf_h = h.reshape(-1, self.n_embd)
+        flat = x[:, :, :, 0].reshape(-1)
         #pool_idx = torch.eq(x[:, :, 0].contiguous().view(-1), self.clf_token)
         clf_h = clf_h[flat == self.clf_token, :]  # .index_select(0, pool_idx)
-        clf_h = clf_h.view(-1, 2, self.n_embd, 1)
+        clf_h = clf_h.reshape(-1, 2, self.n_embd, 1)
         clf_h = self.dropout(clf_h)
-        clf_h = clf_h.view(-1, self.n_embd)
+        clf_h = clf_h.reshape(-1, self.n_embd)
         clf_logits = self.linear(clf_h)
-        return clf_logits.view(-1, 2)
+        return clf_logits.reshape(-1, 2)
 
 
 def load_openai_pretrained_model(
@@ -254,11 +263,11 @@ def load_openai_pretrained_model(
         n_transfer = 1 + n_transfer * 12
     init_params = [arr.squeeze() for arr in init_params]
     try:
-        assert model.embed.weight.shape == init_params[0].shape
+        assert model.embed.W.shape == init_params[0].shape
     except AssertionError as e:
-        e.args += (model.embed.weight.shape, init_params[0].shape)
+        e.args += (model.embed.W.shape, init_params[0].shape)
         raise
-    model.embed.weight.data = torch.from_numpy(init_params[0])
+    model.embed.W.array[:] = init_params[0]
     for name, ip in zip(names[1:n_transfer], init_params[1:n_transfer]):
         name = name[6:]  # skip "model/"
         assert name[-2:] == ":0"
@@ -274,12 +283,15 @@ def load_openai_pretrained_model(
             if len(l) >= 2:
                 num = int(l[1])
                 pointer = pointer[num]
+        if len(pointer.shape) == 2 and pointer.shape[::-1] == ip.shape:
+            ip = ip.T
+            # transpose matrix in a linear layer from tf to chainer
         try:
             assert pointer.shape == ip.shape
         except AssertionError as e:
             e.args += (pointer.shape, ip.shape)
             raise
-        pointer.data = torch.from_numpy(ip)
+        pointer.array[:] = ip
 
 
 class dotdict(dict):
