@@ -1,14 +1,18 @@
-# PyTorch implementation of OpenAI's Finetuned Transformer Language Model
+# Chainer implementation of OpenAI's Finetuned Transformer Language Model
 
-This is a PyTorch implementation of the [TensorFlow code](https://github.com/openai/finetune-transformer-lm) provided with OpenAI's paper ["Improving Language Understanding by Generative Pre-Training"](https://blog.openai.com/language-unsupervised/) by Alec Radford, Karthik Narasimhan, Tim Salimans and Ilya Sutskever.
+This is a **Chainer** implementation of the [TensorFlow code](https://github.com/openai/finetune-transformer-lm) provided with OpenAI's paper ["Improving Language Understanding by Generative Pre-Training"](https://blog.openai.com/language-unsupervised/) by Alec Radford, Karthik Narasimhan, Tim Salimans and Ilya Sutskever.
 
-This implementation comprises **a script to load in the PyTorch model the weights pre-trained by the authors** with the TensorFlow implementation.
+This implementation comprises **a script to load in the Chainer model the weights pre-trained by the authors** with the TensorFlow implementation.
+This is made from [pytorch implementation](https://github.com/huggingface/pytorch-openai-transformer-lm) by line-level replacements as possible.
+If you are interested in differences, see [a diff](https://github.com/soskek/chainer-openai-transformer-lm/commit/b2b971e460e66d8318c2ff0c1b48621856509673) as an example.
+This does not always contain implementations which are conventionally natural for chainer, but you can enjoy alignments with pytorch (and tensorflow).
+
 
 ![Transformer Language Model](assets/ftlm.png)
 
 The model classes and loading script are located in [model_py.py](model_py.py).
 
-The names of the modules in the PyTorch model follow the names of the Variable in the TensorFlow implementation. This implementation tries to follow the original code as closely as possible to minimize the discrepancies.
+The names of the modules in the Chainer model follow the names of the Variable in the TensorFlow implementation. This implementation tries to follow the original code as closely as possible to minimize the discrepancies.
 
 This implementation thus also comprises a modified Adam optimization algorithm as used in OpenAI's paper with:
 - fixed weights decay following the work of [Loshchilov et al.](https://arxiv.org/abs/1711.05101), and
@@ -16,7 +20,8 @@ This implementation thus also comprises a modified Adam optimization algorithm a
 
 ## Requirements
 To use the model it-self by importing [model_py.py](model_py.py), you just need:
-- PyTorch (version >=0.4)
+- Chainer
+- [cupy](https://github.com/cupy/cupy) (for gpu run)
 
 To run the classifier training script in [train.py](train.py) you will need in addition:
 - tqdm
@@ -53,15 +58,7 @@ python train.py --dataset rocstories --desc rocstories --submit --analysis --dat
 ```
 
 #### First experiments on the ROCStories test set
-Finetuning the PyTorch model for 3 Epochs on ROCStories takes 10 minutes to run on a single NVidia K-80.
 
-The test accuracy of this PyTorch version is 83.43% (with the default TensorFlow hyper-parameters not finetuned on the PyTorch model to take into account the differences between PyTorch and TensorFlow internals).
+This Chainer version achieved 85.8% as the test accuracy, which is same as the number the authors reports as a median accuracy with the TensorFlow code.
 
-The authors reports a median accuracy with the TensorFlow code of 85.8%.
-
-The paper reports a best single run accuracy of 86.5%.
-
-The previous SOTA on the ROCStories dataset is 77.6% ("Hidden Coherence Model" of Chaturvedi et al. published in "Story Comprehension for Predicting What Happens Next" EMNLP 2017. Which is a very nice paper by the way, you should check it out)
-
-### TO-DO list
-- [ ] Add Multi-GPU training logic
+For throughput during training, this chainer version achieved around 3.8 it/s while the pytorch code got around 1.1 it/s, in my environment using Tesla P100.
