@@ -31,6 +31,10 @@ To run the classifier training script in [train.py](train.py) you will need in a
 - pandas
 
 You can download the weights of the OpenAI pre-trained version by cloning [Alec Radford's repo](https://github.com/openai/finetune-transformer-lm) and placing the `model` folder containing the pre-trained weights in the present repo.
+```bash
+sh download_model_params.sh
+```
+
 
 ## Using the pre-trained model as a Transformer Language Model
 The model can be used as a transformer language model with OpenAI's pre-trained weights as follow:
