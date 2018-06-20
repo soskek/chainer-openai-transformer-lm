@@ -7,6 +7,7 @@ This is made from [pytorch implementation](https://github.com/huggingface/pytorc
 If you are interested, see [the diff](https://github.com/soskek/chainer-openai-transformer-lm/commit/b2b971e460e66d8318c2ff0c1b48621856509673).
 This does not always contain implementations which are conventionally natural for chainer, but you can enjoy alignments with pytorch (and tensorflow).
 
+This implementation achieved better or almost same accuracies than the original one, on the ROCStories test set. (Med: 85.81 vs 85.8, Best: 87.33 vs 86.5 in 10 runs.)
 
 ![Transformer Language Model](assets/ftlm.png)
 
@@ -63,6 +64,8 @@ python train.py --dataset rocstories --desc rocstories --submit --analysis --dat
 
 #### First experiments on the ROCStories test set
 
-This Chainer version achieved 85.8% as the test accuracy, which is same as the number the authors reports as a median accuracy with the TensorFlow code.
+Test accuracies from 10 runs were [54.04, 84.02, 85.2, 85.62, 85.73, 85.89, 86.26, 86.53, 86.91, 87.33]. The median is 85.81, which is better than the score [original tensorflow code](https://github.com/openai/finetune-transformer-lm) reported (85.8). The best score is 87.33, which is also better than the score in the paper (86.5).
+
+Note that these exactly same values cannot be reproduced because GPU calculations are often not deterministic.
 
 For throughput during training, this chainer version achieved around 3.8 it/s while the pytorch code got around 1.1 it/s, in my environment using Tesla P100.
