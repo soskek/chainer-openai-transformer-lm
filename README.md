@@ -1,13 +1,16 @@
 # Chainer implementation of OpenAI's Finetuned Transformer Language Model
 
 This is a **Chainer** implementation of the [TensorFlow code](https://github.com/openai/finetune-transformer-lm) provided with OpenAI's paper ["Improving Language Understanding by Generative Pre-Training"](https://blog.openai.com/language-unsupervised/) by Alec Radford, Karthik Narasimhan, Tim Salimans and Ilya Sutskever.
+Experiment code for ROCStories and SST (Stanford Sentiment TreeBank) is contained.
 
 This implementation comprises **a script to load in the Chainer model the weights pre-trained by the authors** with the TensorFlow implementation.
 This is made from [pytorch implementation](https://github.com/huggingface/pytorch-openai-transformer-lm) by line-level replacements as possible.
 If you are interested, see [the diff](https://github.com/soskek/chainer-openai-transformer-lm/commit/b2b971e460e66d8318c2ff0c1b48621856509673).
 This does not always contain implementations which are conventionally natural for chainer, but you can enjoy alignments with pytorch (and tensorflow).
 
-This implementation achieved better or almost same accuracies than the original one, on the ROCStories test set. (Med: 85.81 vs 85.8, Best: 87.33 vs 86.5 in 10 runs.)
+This implementation achieved almost same accuracies as the original one.
+- On the ROCStories test set; median is 86.72 vs 85.8, and best is 87.49 vs 86.5 in 10 runs
+- On the SST test set; best is 91.87 vs 91.3 in 10 runs
 
 ![Transformer Language Model](assets/ftlm.png)
 
@@ -54,18 +57,28 @@ To use the positional encoder of the transformer, you should encode your dataset
 ## Fine-tuning the pre-trained model on a classification task
 This model can also be integrated in a classifier as detailed in [OpenAI's paper](https://blog.openai.com/language-unsupervised/). An example of fine-tuning on the ROCStories Cloze task is included with the training code in [train.py](train.py)
 
+
+#### Sentiment Analysis
+
+I newly added implementation for experimenting on the Stanford Sentiment TreeBank. This implementation is original for this Chainer version.
+
+```bash
+python train.py --dataset sst --desc sst --submit --analysis --data_dir [path to data here] --n_batch 32
+```
+
+Test accuracies from 10 runs were [90.88, 90.99, 90.99, 90.99, 91.05, 91.1, 91.16, 91.38, 91.49, 91.87]. The median is 91.07, and the best score is 91.87, which is also better than the score in the paper (91.3).
+
+
+#### ROCStories
+
 The ROCStories dataset can be downloaded from the associated [website](http://cs.rochester.edu/nlp/rocstories/).
 
 As with the [TensorFlow code](https://github.com/openai/finetune-transformer-lm), this code implements the ROCStories Cloze Test result reported in the paper which can be reproduced by running:
 
 ```bash
-python train.py --dataset rocstories --desc rocstories --submit --analysis --data_dir [path to data here]
+python train.py --dataset rocstories --desc rocstories --submit --analysis --data_dir [path to data here] --n_batch 16
 ```
 
-#### First experiments on the ROCStories test set
+Test accuracies from 10 runs were [84.87, 85.68, 86.32, 86.48, 86.58, 86.85, 86.91, 87.01, 87.33, 87.49]. The median is 86.72, which is better than the score [original tensorflow code](https://github.com/openai/finetune-transformer-lm) reported (85.8). The best score is 87.49, which is also better than the score in the paper (86.5). A smaller minibatch size (16) is used due to a memory issue.
 
-Test accuracies from 10 runs were [54.04, 84.02, 85.2, 85.62, 85.73, 85.89, 86.26, 86.53, 86.91, 87.33]. The median is 85.81, which is better than the score [original tensorflow code](https://github.com/openai/finetune-transformer-lm) reported (85.8). The best score is 87.33, which is also better than the score in the paper (86.5).
-
-Note that these exactly same values cannot be reproduced because GPU calculations are often not deterministic.
-
-For throughput during training, this chainer version achieved around 3.8 it/s while the pytorch code got around 1.1 it/s, in my environment using Tesla P100.
+For throughput during training, this chainer version were 3 times faster than the pytorch version.
