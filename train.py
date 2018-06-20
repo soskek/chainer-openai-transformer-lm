@@ -19,8 +19,9 @@ from sklearn.metrics import accuracy_score
 
 from model_py import Model, LMHead, ClfHead, load_openai_pretrained_model
 from opt import get_OpenAIAdam
-from datasets import rocstories
+from datasets import rocstories, sst
 from analysis import rocstories as rocstories_analysis
+from analysis import sst as sst_analysis
 from text_utils import TextEncoder
 from utils import (encode_dataset, flatten, iter_data,
                    ResultLogger, make_path)
@@ -88,6 +89,22 @@ def transform_roc(X1, X2, X3):
         xmb[i, 1, :l13, 0] = x13
         mmb[i, 0, :l12] = 1
         mmb[i, 1, :l13] = 1
+    xmb[:, :, :, 1] = np.arange(
+        n_vocab + n_special, n_vocab + n_special + n_ctx)
+    return xmb, mmb
+
+
+def transform_sst(X1):
+    n_batch = len(X1)
+    xmb = np.zeros((n_batch, 1, n_ctx, 2), dtype=np.int32)
+    mmb = np.zeros((n_batch, 1, n_ctx), dtype=np.float32)
+    start = encoder['_start_']
+    delimiter = encoder['_delimiter_']
+    for i, x1, in enumerate(X1):
+        x1 = [start] + x1[:max_len] + [clf_token]
+        l1 = len(x1)
+        xmb[i, 0, :l1, 0] = x1
+        mmb[i, 0, :l1] = 1
     xmb[:, :, :, 1] = np.arange(
         n_vocab + n_special, n_vocab + n_special + n_ctx)
     return xmb, mmb
@@ -197,20 +214,23 @@ def argmax(x): return np.argmax(x, 1)
 
 pred_fns = {
     'rocstories': argmax,
+    'sst': argmax,
 }
 
 filenames = {
     'rocstories': 'ROCStories.tsv',
+    'sst': 'sst.tsv',
 }
 
 label_decoders = {
     'rocstories': None,
+    'sst': None,
 }
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--desc', type=str)
-    parser.add_argument('--dataset', type=str)
+    parser.add_argument('--dataset', type=str, choices=['rocstories', 'sst'])
     parser.add_argument('--log_dir', type=str, default='log/')
     parser.add_argument('--save_dir', type=str, default='save/')
     parser.add_argument('--data_dir', type=str, default='data/')
@@ -272,39 +292,54 @@ if __name__ == '__main__':
     encoder = text_encoder.encoder
     n_vocab = len(text_encoder.encoder)
 
-    (trX1, trX2, trX3, trY), (vaX1, vaX2, vaX3, vaY), (teX1, teX2, teX3) = encode_dataset(
-        rocstories(data_dir, n_valid=n_valid), encoder=text_encoder)
-    n_y = 2
     encoder['_start_'] = len(encoder)
     encoder['_delimiter_'] = len(encoder)
     encoder['_classify_'] = len(encoder)
     clf_token = encoder['_classify_']
     n_special = 3
     max_len = n_ctx // 2 - 2
-    n_ctx = min(max(
-        [len(x1[:max_len]) + max(len(x2[:max_len]),
-                                 len(x3[:max_len])) for x1, x2, x3 in zip(trX1, trX2, trX3)]
-        + [len(x1[:max_len]) + max(len(x2[:max_len]),
-                                   len(x3[:max_len])) for x1, x2, x3 in zip(vaX1, vaX2, vaX3)]
-        + [len(x1[:max_len]) + max(len(x2[:max_len]),
-                                   len(x3[:max_len])) for x1, x2, x3 in zip(teX1, teX2, teX3)]
-    ) + 3,
-        n_ctx)
 
-    vocab = n_vocab + n_special + n_ctx
-    trX, trM = transform_roc(trX1, trX2, trX3)
-    vaX, vaM = transform_roc(vaX1, vaX2, vaX3)
-    if submit:
-        teX, teM = transform_roc(teX1, teX2, teX3)
+    if dataset == 'rocstories':
+        (trX1, trX2, trX3, trY), (vaX1, vaX2, vaX3, vaY), (teX1, teX2, teX3) = encode_dataset(
+            rocstories(data_dir, n_valid=n_valid), encoder=text_encoder)
+        n_y = 2
+        n_ctx = min(max(
+            [len(x1[:max_len]) + max(len(x2[:max_len]),
+                                     len(x3[:max_len])) for x1, x2, x3 in zip(trX1, trX2, trX3)]
+            + [len(x1[:max_len]) + max(len(x2[:max_len]),
+                                       len(x3[:max_len])) for x1, x2, x3 in zip(vaX1, vaX2, vaX3)]
+            + [len(x1[:max_len]) + max(len(x2[:max_len]),
+                                       len(x3[:max_len])) for x1, x2, x3 in zip(teX1, teX2, teX3)]
+        ) + 3,
+            n_ctx)
+        vocab = n_vocab + n_special + n_ctx
+        trX, trM = transform_roc(trX1, trX2, trX3)
+        vaX, vaM = transform_roc(vaX1, vaX2, vaX3)
+        if submit:
+            teX, teM = transform_roc(teX1, teX2, teX3)
+    elif dataset == 'sst':
+        (trX, trY), (vaX, vaY), (teX, teY) = encode_dataset(
+            sst(), encoder=text_encoder)
+        n_y = 2
+        n_ctx = min(max(max(len(x[:max_len]) for x in X)
+                        for X in [trX, vaX, teX]) + 3, n_ctx)
+        vocab = n_vocab + n_special + n_ctx
+        trX, trM = transform_sst(trX)
+        vaX, vaM = transform_sst(vaX)
+        if submit:
+            teX, teM = transform_sst(teX)
+    else:
+        raise NotImplementedError
 
     n_train = len(trY)
     n_valid = len(vaY)
     n_batch_train = n_batch * n_gpu
     n_updates_total = (n_train // n_batch_train) * n_iter
+    single_prediction = (dataset != 'rocstories')
 
     model = Model(args, vocab, n_ctx)
     lm_head = LMHead(model, args)
-    clf_head = ClfHead(clf_token, args)
+    clf_head = ClfHead(clf_token, args, single_prediction=single_prediction)
 
     criterion = F.SoftmaxCrossEntropy(reduce='no')
     model_opt = get_OpenAIAdam([model, clf_head], lr=lr, schedule=lr_schedule,
@@ -340,7 +375,15 @@ if __name__ == '__main__':
         chainer.serializers.load_npz(make_path(path), model)
         predict()
         if analysis:
-            rocstories_analysis(
-                data_dir, os.path.join(
-                    submission_dir, 'ROCStories.tsv'), os.path.join(
-                    log_dir, 'rocstories.jsonl'))
+            if dataset == 'rocstories':
+                rocstories_analysis(
+                    data_dir, os.path.join(
+                        submission_dir, filenames[dataset]), os.path.join(
+                            log_dir, '{}.jsonl'.format(desc)))
+            elif dataset == 'sst':
+                sst_analysis(
+                    data_dir, os.path.join(
+                        submission_dir, filenames[dataset]), os.path.join(
+                            log_dir, '{}.jsonl'.format(desc)))
+            else:
+                raise NotImplementedError

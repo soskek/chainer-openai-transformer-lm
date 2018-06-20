@@ -207,7 +207,7 @@ class LMHead(chainer.Chain):
 class ClfHead(chainer.Chain):
     """ Classifier Head for the transformer """
 
-    def __init__(self, clf_token, cfg):
+    def __init__(self, clf_token, cfg, single_prediction=False):
         super(ClfHead, self).__init__()
         self.n_embd = cfg.n_embd
         self.clf_token = clf_token
@@ -216,6 +216,7 @@ class ClfHead(chainer.Chain):
         with self.init_scope():
             self.linear = L.Linear(cfg.n_embd, 1,
                                    initialW=initializers.Normal(scale=0.02))
+        self.single_prediction = single_prediction
 
     def __call__(self, h, x):
         # Classification logits
@@ -223,11 +224,13 @@ class ClfHead(chainer.Chain):
         flat = x[:, :, :, 0].reshape(-1)
         #pool_idx = torch.eq(x[:, :, 0].contiguous().view(-1), self.clf_token)
         clf_h = clf_h[flat == self.clf_token, :]  # .index_select(0, pool_idx)
-        clf_h = clf_h.reshape(-1, 2, self.n_embd, 1)
         clf_h = self.dropout(clf_h)
         clf_h = clf_h.reshape(-1, self.n_embd)
         clf_logits = self.linear(clf_h)
-        return clf_logits.reshape(-1, 2)
+        if self.single_prediction:
+            return F.concat([clf_logits, 1 - clf_logits], axis=-1)
+        else:
+            return clf_logits.reshape(-1, 2)
 
 
 def load_openai_pretrained_model(
