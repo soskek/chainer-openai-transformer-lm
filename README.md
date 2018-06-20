@@ -1,16 +1,16 @@
 # Chainer implementation of OpenAI's Finetuned Transformer Language Model
 
 This is a **Chainer** implementation of the [TensorFlow code](https://github.com/openai/finetune-transformer-lm) provided with OpenAI's paper ["Improving Language Understanding by Generative Pre-Training"](https://blog.openai.com/language-unsupervised/) by Alec Radford, Karthik Narasimhan, Tim Salimans and Ilya Sutskever.
-Experiment code for ROCStories and SST (Stanford Sentiment TreeBank) is contained.
+**Experiment code for ROCStories and SST (Stanford Sentiment Treebank) is contained.**
 
 This implementation comprises **a script to load in the Chainer model the weights pre-trained by the authors** with the TensorFlow implementation.
 This is made from [pytorch implementation](https://github.com/huggingface/pytorch-openai-transformer-lm) by line-level replacements as possible.
 If you are interested, see [the diff](https://github.com/soskek/chainer-openai-transformer-lm/commit/b2b971e460e66d8318c2ff0c1b48621856509673).
 This does not always contain implementations which are conventionally natural for chainer, but you can enjoy alignments with pytorch (and tensorflow).
 
-This implementation achieved almost same accuracies as the original one.
-- On the ROCStories test set; median is 86.72 vs 85.8, and best is 87.49 vs 86.5 in 10 runs
-- On the SST test set; best is 91.87 vs 91.3 in 10 runs
+This implementation achieved better or same accuracies as ones the paper reported.
+- On the ROCStories test set: median is *86.72* vs 85.8, and best is *87.49* vs 86.5 in 10 runs.
+- On the SST test set: best is *91.87* vs 91.3 in 10 runs.
 
 ![Transformer Language Model](assets/ftlm.png)
 
@@ -55,12 +55,12 @@ This model generates Transformer's hidden states. You can use the `LMHead` class
 To use the positional encoder of the transformer, you should encode your dataset using the `encode_dataset()` function of [utils.py](utils.py). Please refer to the beginning of the `__main__` function in [train.py](train.py) to see how to properly define the vocabulary and encode your dataset.
 
 ## Fine-tuning the pre-trained model on a classification task
-This model can also be integrated in a classifier as detailed in [OpenAI's paper](https://blog.openai.com/language-unsupervised/). An example of fine-tuning on the ROCStories Cloze task is included with the training code in [train.py](train.py)
+This model can also be integrated in a classifier as detailed in [OpenAI's paper](https://blog.openai.com/language-unsupervised/). An example of fine-tuning on the Stanford Sentiment Treebank dataset and the ROCStories Cloze task is included with the training code in [train.py](train.py)
 
 
-#### Sentiment Analysis
+### Sentiment Analysis
 
-I newly added implementation for experimenting on the Stanford Sentiment TreeBank. This implementation is original for this Chainer version. Downloading the datasets is automatically done in the script.
+I newly added implementation for experimenting on the Stanford Sentiment Treebank. This implementation is original for this Chainer version. Downloading the datasets is automatically done in the script.
 
 ```bash
 python train.py --dataset sst --desc sst --submit --analysis --data_dir [path to data here] --n_batch 32
@@ -69,7 +69,7 @@ python train.py --dataset sst --desc sst --submit --analysis --data_dir [path to
 Test accuracies from 10 runs were [90.88, 90.99, 90.99, 90.99, 91.05, 91.1, 91.16, 91.38, 91.49, 91.87]. The median is 91.07, and the best score is 91.87, which is also better than the score in the paper (91.3).
 
 
-#### ROCStories
+### ROCStories
 
 The ROCStories dataset can be downloaded from the associated [website](http://cs.rochester.edu/nlp/rocstories/).
 
