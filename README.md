@@ -60,7 +60,7 @@ This model can also be integrated in a classifier as detailed in [OpenAI's paper
 
 #### Sentiment Analysis
 
-I newly added implementation for experimenting on the Stanford Sentiment TreeBank. This implementation is original for this Chainer version.
+I newly added implementation for experimenting on the Stanford Sentiment TreeBank. This implementation is original for this Chainer version. Downloading the datasets is automatically done in the script.
 
 ```bash
 python train.py --dataset sst --desc sst --submit --analysis --data_dir [path to data here] --n_batch 32
